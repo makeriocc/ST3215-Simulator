@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ST3215 Servo Simulator</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+        }
+        body {
+            background-color: #f3f4f6;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1000px;
+            background-color: #ffffff;
+            padding: 24px;
+            border-radius: 8px;
+            box-shadow: 0 10px 15px rgba(0, 0, 0, 0.1), 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin: 16px;
+        }
+        h1 {
+            font-size: 30px;
+            font-weight: 700;
+            color: #1f2937;
+            margin-bottom: 24px;
+            text-align: center;
+        }
+        .main {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+        @media (min-width: 768px) {
+            .main {
+                flex-direction: row;
+            }
+        }
+        .left-panel, .right-panel {
+            flex: 1;
+        }
+        canvas {
+            border: 1px solid #e5e7eb;
+            display: block;
+            margin: 0 auto;
+        }
+        .controls {
+            margin-top: 16px;
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+        }
+        .manual-command {
+            margin-top: 16px;
+        }
+        .manual-command label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            color: #374151;
+            margin-bottom: 4px;
+        }
+        .manual-command div {
+            display: flex;
+            gap: 8px;
+        }
+        input[type="text"] {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid #e5e7eb;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.5);
+        }
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            color: #ffffff;
+        }
+        .connect-btn {
+            background-color: #3b82f6;
+        }
+        .connect-btn:hover:not(:disabled) {
+            background-color: #2563eb;
+        }
+        .connect-btn:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+        }
+        .send-btn {
+            background-color: #22c55e;
+        }
+        .send-btn:hover {
+            background-color: #16a34a;
+        }
+        h2 {
+            font-size: 20px;
+            font-weight: 600;
+            color: #1f2937;
+            margin-bottom: 16px;
+        }
+        .status-panel p {
+            font-size: 14px;
+            color: #374151;
+            margin-bottom: 8px;
+        }
+        .status-panel p strong {
+            font-weight: 500;
+        }
+        .log-panel {
+            background-color: #f3f4f6;
+            padding: 8px;
+            border: 1px solid #e5e7eb;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+        }
+        .log-panel p {
+            color: #1f2937;
+            margin-bottom: 4px;
+        }
+        .log-panel .error {
+            color: #dc2626;
+        }
+        .log-panel .warning {
+            color: #ca8a04;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ST3215 Servo Simulator</h1>
+        <div class="main">
+            <div class="left-panel">
+                <canvas id="servoCanvas" width="300" height="300"></canvas>
+                <div class="controls">
+                    <button id="connectBtn" class="connect-btn">Connect Serial</button>
+                </div>
+                <div class="manual-command">
+                    <label for="manualCommand">Manual Command (hex bytes)</label>
+                    <div>
+                        <input type="text" id="manualCommand" placeholder="FF FF 01 02 01 FB">
+                        <button id="sendBtn" class="send-btn">Send</button>
+                    </div>
+                </div>
+            </div>
+            <div class="right-panel">
+                <h2>Servo Status</h2>
+                <div id="statusPanel" class="status-panel"></div>
+                <h2>Logs</h2>
+                <div id="logPanel" class="log-panel"></div>
+            </div>
+        </div>
+    </div>
+    <script>
+        const ServoInstruction = {
+            PING: 0x01,
+            READ_DATA: 0x02,
+            WRITE_DATA: 0x03,
+            REG_WRITE: 0x04,
+            ACTION: 0x05,
+            RECOVERY: 0x06,
+            RESET: 0x0A,
+            SYNC_READ: 0x82,
+            SYNC_WRITE: 0x83
+        };
+        const ServoMode = {
+            POSITION_MODE: 0,
+            SPEED_MODE: 1,
+            PWM_MODE: 2,
+            STEP_MODE: 3
+        };
+        const ServoError = {
+            NO_ERROR: 0,
+            INVALID_PARAM: 1,
+            EPROM_LOCKED: 2,
+            OUT_OF_RANGE: 3,
+            PROTECTION_TRIGGERED: 4
+        };
+
+        class ST3215Simulator {
+            constructor(servoId = 1) {
+                this.servoId = servoId;
+                this.broadcastId = 0xFE;
+                this.memory = this.initializeMemory();
+                this.currentPosition = 0.0;
+                this.targetPosition = 0;
+                this.currentSpeed = 0;
+                this.targetSpeed = 0;
+                this.isMoving = false;
+                this.torqueEnabled = false;
+                this.integralError = 0.0;
+                this.lastError = 0.0;
+                this.regWriteBuffer = null;
+                this.positionTolerance = this.memory[0x1A];
+                this.maxAcceleration = 254 * 100;
+                this.lastUpdateTime = performance.now() / 1000;
+                this.protectionActive = false;
+                this.statusFlags = 0;
+                this.logs = [];
+                this.simulationRunning = true;
+                this.animationFrameId = null;
+                this.logCallback = () => {};
+            }
+            setLogCallback(callback) {
+                this.logCallback = callback;
+            }
+            log(message, level = 'info') {
+                const logEntry = { message, level, timestamp: new Date().toLocaleTimeString() };
+                this.logs = [...this.logs.slice(-99), logEntry];
+                this.logCallback(logEntry);
+            }
+            initializeMemory() {
+                const memory = new Uint8Array(256);
+                memory[0x00] = 2; memory[0x01] = 43; memory[0x03] = 1; memory[0x05] = this.servoId;
+                memory[0x06] = 0; memory[0x07] = 250; memory[0x08] = 1;
+                new DataView(memory.buffer).setUint16(0x09, 0, true);
+                new DataView(memory.buffer).setUint16(0x0B, 4095, true);
+                memory[0x0D] = 70; memory[0x0E] = 80; memory[0x0F] = 40;
+                new DataView(memory.buffer).setUint16(0x10, 1000, true);
+                memory[0x13] = 44; memory[0x14] = 47; memory[0x15] = 32; memory[0x1A] = 1;
+                memory[0x1B] = 1; new DataView(memory.buffer).setUint16(0x1C, 100, true);
+                memory[0x1E] = 1; memory[0x22] = 20; memory[0x23] = 200; memory[0x24] = 80;
+                memory[0x25] = 20; memory[0x26] = 200; new DataView(memory.buffer).setUint16(0x30, 1000, true);
+                memory[0x3E] = 80; memory[0x3F] = 25; new DataView(memory.buffer).setUint16(0x45, 50, true);
+                return memory;
+            }
+            validateWrite(address, data) {
+                if (address < 0x28 && this.memory[0x37] === 1) return ServoError.EPROM_LOCKED;
+                if (address + data.length > this.memory.length) return ServoError.INVALID_PARAM;
+                if ([...Array(5).keys(), 0x38, 0x46].includes(address)) return ServoError.OUT_OF_RANGE;
+                if (address === 0x05 && data[0] > 253) return ServoError.OUT_OF_RANGE;
+                if (address === 0x09 && data.length >= 2) {
+                    const value = new DataView(new Uint8Array(data.slice(0, 2)).buffer).getUint16(0, true);
+                    const maxLimit = new DataView(this.memory.buffer).getUint16(0x0B, true);
+                    if (value >= maxLimit || value > 4094) return ServoError.OUT_OF_RANGE;
+                }
+                if (address === 0x0B && data.length >= 2) {
+                    const value = new DataView(new Uint8Array(data.slice(0, 2)).buffer).getUint16(0, true);
+                    const minLimit = new DataView(this.memory.buffer).getUint16(0x09, true);
+                    if (value <= minLimit || value > 4095) return ServoError.OUT_OF_RANGE;
+                }
+                return null;
+            }
+            calculateChecksum(packet) {
+                const sum = packet.slice(2).reduce((a, b) => a + b, 0);
+                return (~sum) & 0xFF;
+            }
+            parsePacket(data) {
+                if (data.length < 5) {
+                    this.log(`Packet too short: ${data.map(x => x.toString(16).padStart(2, '0').toUpperCase()).join('')}`, 'warning');
+                    return null;
+                }
+                if (data[0] !== 0xFF || data[1] !== 0xFF) {
+                    this.log(`Invalid header: ${data.map(x => x.toString(16).padStart(2, '0').toUpperCase()).join('')}`, 'warning');
+                    return null;
+                }
+                const packetId = data[2];
+                const length = data[3];
+                if (data.length !== 4 + length) {
+                    this.log(`Invalid length: expected ${4 + length}, got ${data.length}`, 'warning');
+                    return null;
+                }
+                const instruction = data[4];
+                const parameters = data.slice(5, 4 + length - 1);
+                const receivedChecksum = data[4 + length - 1];
+                const calculatedChecksum = this.calculateChecksum([...data.slice(0, 4 + length - 1)]);
+                if (receivedChecksum !== calculatedChecksum) {
+                    this.log(`Checksum error: received ${receivedChecksum.toString(16).toUpperCase()}, calculated ${calculatedChecksum.toString(16).toUpperCase()}`, 'warning');
+                    return null;
+                }
+                return { packetId, instruction, parameters: Array.from(parameters) };
+            }
+            createResponse(error = 0, parameters = []) {
+                const packet = [0xFF, 0xFF, this.servoId, parameters.length + 2, error, ...parameters];
+                packet.push(this.calculateChecksum(packet));
+                this.log(`Response: ${packet.map(x => x.toString(16).padStart(2, '0').toUpperCase()).join(' ')}`, 'debug');
+                return new Uint8Array(packet);
+            }
+            checkProtection() {
+                const unloadConditions = this.memory[0x13];
+                const currentTemp = this.memory[0x3F];
+                const currentVoltage = this.memory[0x3E];
+                const currentCurrent = new DataView(this.memory.buffer).getUint16(0x45, true);
+                const currentLoad = new DataView(this.memory.buffer).getUint16(0x3C, true);
+                let status = 0;
+                if ((unloadConditions & 0x04) && currentTemp > this.memory[0x0D]) status |= 0x04;
+                if ((unloadConditions & 0x01) && (currentVoltage > this.memory[0x0E] || currentVoltage < this.memory[0x0F])) status |= 0x01;
+                if ((unloadConditions & 0x08) && currentCurrent > new DataView(this.memory.buffer).getUint16(0x1C, true)) status |= 0x08;
+                if ((unloadConditions & 0x20) && currentLoad > (this.memory[0x24] * 10)) status |= 0x20;
+                this.memory[0x41] = status;
+                this.protectionActive = status !== 0;
+                if (this.protectionActive) {
+                    this.torqueEnabled = false;
+                    this.memory[0x28] = 0;
+                    this.log(`Protection triggered: status=0x${status.toString(16).toUpperCase()}`, 'warning');
+                }
+                return this.protectionActive;
+            }
+            handlePing() {
+                return this.createResponse();
+            }
+            handleReadData(parameters) {
+                if (parameters.length !== 2) return this.createResponse(ServoError.INVALID_PARAM);
+                const startAddress = parameters[0];
+                const readLength = parameters[1];
+                if (startAddress + readLength > this.memory.length) return this.createResponse(ServoError.OUT_OF_RANGE);
+                const data = Array.from(this.memory.slice(startAddress, startAddress + readLength));
+                this.log(`Read data from 0x${startAddress.toString(16).padStart(2, '0').toUpperCase()}: ${data.map(x => x.toString(16).padStart(2, '0').toUpperCase()).join(' ')}`);
+                return this.createResponse(0, data);
+            }
+            handleWriteData(parameters, isRegWrite = false) {
+                if (parameters.length < 1) return this.createResponse(ServoError.INVALID_PARAM);
+                const startAddress = parameters[0];
+                const data = parameters.slice(1);
+                const error = this.validateWrite(startAddress, data);
+                if (error !== null) return this.createResponse(error);
+                if (isRegWrite) {
+                    this.regWriteBuffer = { startAddress, data };
+                    this.memory[0x40] = 1;
+                    this.log(`REG_WRITE stored: address=0x${startAddress.toString(16).toUpperCase()}, data=${data.map(x => x.toString(16).toUpperCase()).join(' ')}`);
+                    return this.createResponse();
+                }
+                this.memory.set(data, startAddress);
+                this.handleMemoryWrite(startAddress, data);
+                this.log(`WRITE_DATA to 0x${startAddress.toString(16).toUpperCase()}: ${data.map(x => x.toString(16).toUpperCase()).join(' ')}`);
+                return this.createResponse();
+            }
+            handleRegWrite(parameters) {
+                return this.handleWriteData(parameters, true);
+            }
+            handleAction() {
+                if (!this.regWriteBuffer) return this.createResponse(ServoError.INVALID_PARAM);
+                const { startAddress, data } = this.regWriteBuffer;
+                const error = this.validateWrite(startAddress, data);
+                if (error !== null) return this.createResponse(error);
+                this.memory.set(data, startAddress);
+                this.handleMemoryWrite(startAddress, data);
+                this.regWriteBuffer = null;
+                this.memory[0x40] = 0;
+                this.log(`ACTION executed: address=0x${startAddress.toString(16).toUpperCase()}, data=${data.map(x => x.toString(16).toUpperCase()).join(' ')}`);
+                return this.createResponse();
+            }
+            handleSyncWrite(parameters) {
+                if (parameters.length < 4) return this.createResponse(ServoError.INVALID_PARAM);
+                const startAddress = parameters[0];
+                const dataLength = parameters[1];
+                let index = 2;
+                while (index < parameters.length) {
+                    if (index + dataLength + 1 > parameters.length) return this.createResponse(ServoError.INVALID_PARAM);
+                    const servoId = parameters[index];
+                    if (servoId === this.servoId) {
+                        const data = parameters.slice(index + 1, index + 1 + dataLength);
+                        const error = this.validateWrite(startAddress, data);
+                        if (error !== null) return this.createResponse(error);
+                        this.memory.set(data, startAddress);
+                        this.handleMemoryWrite(startAddress, data);
+                        this.log(`SYNC_WRITE to ID=${servoId}, address=0x${startAddress.toString(16).toUpperCase()}: ${data.map(x => x.toString(16).toUpperCase()).join(' ')}`);
+                    }
+                    index += dataLength + 1;
+                }
+                return this.createResponse();
+            }
+            handleSyncRead(parameters) {
+                if (parameters.length < 4) return this.createResponse(ServoError.INVALID_PARAM);
+                const startAddress = parameters[0];
+                const readLength = parameters[1];
+                const servoIds = parameters.slice(3);
+                if (!servoIds.includes(this.servoId)) return null;
+                if (startAddress + readLength > this.memory.length) return this.createResponse(ServoError.OUT_OF_RANGE);
+                const data = Array.from(this.memory.slice(startAddress, startAddress + readLength));
+                this.log(`SYNC_READ from ID=${this.servoId}, address=0x${startAddress.toString(16).toUpperCase()}: ${data.map(x => x.toString(16).toUpperCase()).join(' ')}`);
+                return this.createResponse(0, data);
+            }
+            handleRecovery() {
+                this.memory[0x05] = 1; this.memory[0x06] = 0; this.memory[0x07] = 250; this.memory[0x08] = 1;
+                new DataView(this.memory.buffer).setUint16(0x09, 0, true);
+                new DataView(this.memory.buffer).setUint16(0x0B, 4095, true);
+                this.memory[0x0D] = 70; this.memory[0x0E] = 80; this.memory[0x0F] = 40;
+                new DataView(this.memory.buffer).setUint16(0x10, 1000, true);
+                this.memory[0x12] = 0; this.memory[0x13] = 44; this.memory[0x14] = 47; this.memory[0x15] = 32;
+                this.memory[0x21] = 0; this.memory[0x28] = 0;
+                this.handleMemoryWrite(0x28, [0]);
+                this.currentPosition = 0; this.targetPosition = 0; this.currentSpeed = 0; this.targetSpeed = 0;
+                this.isMoving = false; this.servoId = 1;
+                this.log('RECOVERY executed: parameters reset');
+                return this.createResponse();
+            }
+            handleReset() {
+                this.currentPosition = 0; this.currentSpeed = 0; this.isMoving = false;
+                this.integralError = 0; this.lastError = 0;
+                new DataView(this.memory.buffer).setInt16(0x38, 0, true);
+                new DataView(this.memory.buffer).setInt16(0x3A, 0, true);
+                this.memory[0x41] = 0; this.memory[0x42] = 0;
+                this.log('RESET executed: status cleared');
+                return this.createResponse();
+            }
+            handleMemoryWrite(address, data) {
+                if (address === 0x05) {
+                    this.servoId = data[0];
+                    this.log(`Servo ID changed to: ${this.servoId}`);
+                } else if (address === 0x1A) {
+                    this.positionTolerance = data[0];
+                } else if (address === 0x28) {
+                    if (data[0] === 128) {
+                        this.currentPosition = 2048;
+                        new DataView(this.memory.buffer).setInt16(0x38, this.currentPosition, true);
+                        this.log('Position calibrated to 2048');
+                    } else {
+                        this.torqueEnabled = data[0] !== 0;
+                        this.log(`Torque enabled: ${this.torqueEnabled}`);
+                    }
+                } else if (address === 0x2A && data.length >= 2) {
+                    this.targetPosition = new DataView(new Uint8Array(data.slice(0, 2)).buffer).getInt16(0, true);
+                    this.log(`Target position set to: ${this.targetPosition}`);
+                } else if (address === 0x2E && data.length >= 2) {
+                    this.targetSpeed = new DataView(new Uint8Array(data.slice(0, 2)).buffer).getInt16(0, true);
+                    this.log(`Target speed set to: ${this.targetSpeed}`);
+                }
+            }
+            processPacket(data) {
+                const parsed = this.parsePacket(data);
+                if (!parsed) return null;
+                const { packetId, instruction, parameters } = parsed;
+                if (packetId !== this.servoId && packetId !== this.broadcastId) return null;
+                this.log(`Processing instruction 0x${instruction.toString(16).toUpperCase()} with parameters: ${parameters.map(x => x.toString(16).toUpperCase()).join(' ')}`, 'debug');
+                if (this.checkProtection() && ![ServoInstruction.RECOVERY, ServoInstruction.RESET].includes(instruction)) {
+                    return this.createResponse(ServoError.PROTECTION_TRIGGERED);
+                }
+                if (instruction === ServoInstruction.PING) {
+                    return packetId === this.broadcastId ? null : this.handlePing();
+                } else if (instruction === ServoInstruction.READ_DATA) {
+                    return this.handleReadData(parameters);
+                } else if (instruction === ServoInstruction.WRITE_DATA) {
+                    const response = this.handleWriteData(parameters);
+                    return packetId === this.broadcastId ? null : response;
+                } else if (instruction === ServoInstruction.REG_WRITE) {
+                    const response = this.handleRegWrite(parameters);
+                    return packetId === this.broadcastId ? null : response;
+                } else if (instruction === ServoInstruction.ACTION) {
+                    return packetId === this.broadcastId ? null : this.handleAction();
+                } else if (instruction === ServoInstruction.SYNC_WRITE) {
+                    return this.handleSyncWrite(parameters);
+                } else if (instruction === ServoInstruction.SYNC_READ) {
+                    return this.handleSyncRead(parameters);
+                } else if (instruction === ServoInstruction.RECOVERY) {
+                    const response = this.handleRecovery();
+                    return packetId === this.broadcastId ? null : response;
+                } else if (instruction === ServoInstruction.RESET) {
+                    const response = this.handleReset();
+                    return packetId === this.broadcastId ? null : response;
+                } else {
+                    this.log(`Unsupported instruction: 0x${instruction.toString(16).toUpperCase()}`, 'error');
+                    return this.createResponse(ServoError.INVALID_PARAM);
+                }
+            }
+            updatePosition(dt) {
+                const operatingMode = this.memory[0x21];
+                const acceleration = this.memory[0x29] * 100;
+                if (operatingMode === ServoMode.POSITION_MODE) {
+                    const positionError = this.targetPosition - this.currentPosition;
+                    if (Math.abs(positionError) <= this.positionTolerance) {
+                        this.currentSpeed = 0;
+                        this.currentPosition = this.targetPosition;
+                        this.isMoving = false;
+                        return;
+                    }
+                    const kp = this.memory[0x15] / 100.0;
+                    const ki = this.memory[0x17] / 100.0;
+                    const kd = this.memory[0x16] / 100.0;
+                    const integralLimit = this.memory[0x19] * 4 || Infinity;
+                    this.integralError = Math.max(-integralLimit, Math.min(integralLimit, this.integralError + positionError * dt));
+                    const derivative = dt > 0 ? (positionError - this.lastError) / dt : 0;
+                    this.lastError = positionError;
+                    let speed = kp * positionError + ki * this.integralError + kd * derivative;
+                    speed = Math.max(-32766, Math.min(32766, speed));
+                    if (acceleration > 0) {
+                        const speedDiff = speed - this.currentSpeed;
+                        const maxChange = acceleration * dt;
+                        if (Math.abs(speedDiff) > maxChange) {
+                            speed = this.currentSpeed + Math.sign(speedDiff) * maxChange;
+                        }
+                    }
+                    this.currentSpeed = speed;
+                    this.currentPosition += speed * dt;
+                    this.isMoving = true;
+                } else if (operatingMode === ServoMode.SPEED_MODE) {
+                    const speedUnit = (this.memory[0x12] & 0x02) >> 1;
+                    const target = speedUnit ? this.targetSpeed * 50 : this.targetSpeed;
+                    const kp = this.memory[0x25] / 100.0;
+                    const ki = this.memory[0x27] / 1000.0;
+                    const speedError = target - this.currentSpeed;
+                    this.integralError += speedError * dt;
+                    let speed = this.currentSpeed + (kp * speedError + ki * this.integralError);
+                    if (acceleration > 0) {
+                        const speedDiff = speed - this.currentSpeed;
+                        const maxChange = acceleration * dt;
+                        if (Math.abs(speedDiff) > maxChange) {
+                            speed = this.currentSpeed + Math.sign(speedDiff) * maxChange;
+                        }
+                    }
+                    this.currentSpeed = speed;
+                    this.currentPosition += this.currentSpeed * dt;
+                    this.isMoving = Math.abs(this.currentSpeed) > 0;
+                } else if (operatingMode === ServoMode.PWM_MODE) {
+                    const pwm = new DataView(this.memory.buffer).getUint16(0x2C, true);
+                    if (pwm) {
+                        const direction = (pwm & 0x0400) === 0 ? 1 : -1;
+                        const pwmValue = (pwm & 0x03FF) / 1000.0;
+                        this.currentSpeed = direction * pwmValue * 32766;
+                        this.currentPosition += this.currentSpeed * dt;
+                        this.isMoving = true;
+                    } else {
+                        this.currentSpeed = 0;
+                        this.isMoving = false;
+                    }
+                } else if (operatingMode === ServoMode.STEP_MODE) {
+                    if (Math.abs(this.currentPosition - this.targetPosition) > this.positionTolerance) {
+                        const stepSize = this.targetPosition > this.currentPosition ? 1 : -1;
+                        this.currentPosition += stepSize;
+                        this.currentSpeed = dt > 0 ? stepSize / dt : 0;
+                        this.isMoving = true;
+                    } else {
+                        this.currentSpeed = 0;
+                        this.isMoving = false;
+                    }
+                }
+            }
+            updateMemoryStatus() {
+                new DataView(this.memory.buffer).setInt16(0x38, Math.round(this.currentPosition), true);
+                new DataView(this.memory.buffer).setInt16(0x3A, Math.round(this.currentSpeed), true);
+                this.memory[0x42] = this.isMoving ? 1 : 0;
+                const load = Math.min(1000, Math.round(Math.abs(this.currentSpeed) / 32.766));
+                new DataView(this.memory.buffer).setUint16(0x3C, load, true);
+                const current = Math.min(500, Math.round(load / 2) + 50);
+                new DataView(this.memory.buffer).setUint16(0x45, current, true);
+                let temp = this.memory[0x3F];
+                temp += load / 1000.0 * 0.1;
+                temp = Math.min(100, Math.max(25, temp));
+                this.memory[0x3F] = Math.round(temp);
+            }
+            simulationLoop(timestamp) {
+                if (!this.simulationRunning) return;
+                const currentTime = timestamp / 1000;
+                const dt = currentTime - this.lastUpdateTime;
+                this.lastUpdateTime = currentTime;
+                if (this.torqueEnabled && !this.protectionActive) {
+                    this.updatePosition(dt);
+                    this.updateMemoryStatus();
+                }
+                this.animationFrameId = requestAnimationFrame(t => this.simulationLoop(t));
+            }
+            startSimulation() {
+                if (!this.animationFrameId) {
+                    this.lastUpdateTime = performance.now() / 1000;
+                    this.animationFrameId = requestAnimationFrame(t => this.simulationLoop(t));
+                }
+            }
+            stopSimulation() {
+                if (this.animationFrameId) {
+                    cancelAnimationFrame(this.animationFrameId);
+                    this.animationFrameId = null;
+                }
+                this.simulationRunning = false;
+            }
+            getStatus() {
+                return {
+                    id: this.servoId,
+                    position: this.currentPosition,
+                    targetPosition: this.targetPosition,
+                    speed: this.currentSpeed,
+                    targetSpeed: this.targetSpeed,
+                    isMoving: this.isMoving,
+                    torqueEnabled: this.torqueEnabled,
+                    operatingMode: this.memory[0x21],
+                    voltage: this.memory[0x3E] / 10.0,
+                    temperature: this.memory[0x3F],
+                    current: new DataView(this.memory.buffer).getUint16(0x45, true) * 6.5,
+                    protectionActive: this.protectionActive,
+                    statusFlags: this.memory[0x41]
+                };
+            }
+        }
+
+        const simulator = new ST3215Simulator();
+        let port = null;
+        let isConnecting = false;
+
+        const canvas = document.getElementById('servoCanvas');
+        const ctx = canvas.getContext('2d');
+        const connectBtn = document.getElementById('connectBtn');
+        const manualCommandInput = document.getElementById('manualCommand');
+        const sendBtn = document.getElementById('sendBtn');
+        const statusPanel = document.getElementById('statusPanel');
+        const logPanel = document.getElementById('logPanel');
+
+        function updateCanvas(position) {
+            const width = canvas.width;
+            const height = canvas.height;
+            ctx.clearRect(0, 0, width, height);
+            ctx.translate(width / 2, height / 2);
+            const angle = position / 4095 * Math.PI * 2 - Math.PI;
+            ctx.rotate(angle);
+            ctx.fillStyle = '#3b82f6';
+            ctx.fillRect(-10, -5, 100, 10);
+            ctx.beginPath();
+            ctx.arc(0, 0, 10, 0, Math.PI * 2);
+            ctx.fillStyle = '#1f2937';
+            ctx.fill();
+            ctx.resetTransform();
+            ctx.fillStyle = '#9ca3af';
+            ctx.beginPath();
+            ctx.arc(width / 2, height / 2, 100, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+
+        function updateStatus() {
+            const status = simulator.getStatus();
+            statusPanel.innerHTML = `
+                <p><strong>ID:</strong> ${status.id}</p>
+                <p><strong>Position:</strong> ${status.position.toFixed(1)} steps</p>
+                <p><strong>Target Position:</strong> ${status.targetPosition} steps</p>
+                <p><strong>Speed:</strong> ${status.speed.toFixed(1)} steps/s</p>
+                <p><strong>Target Speed:</strong> ${status.targetSpeed} steps/s</p>
+                <p><strong>Moving:</strong> ${status.isMoving ? 'Yes' : 'No'}</p>
+                <p><strong>Torque:</strong> ${status.torqueEnabled ? 'Enabled' : 'Disabled'}</p>
+                <p><strong>Mode:</strong> ${['Position', 'Speed', 'PWM', 'Step'][status.operatingMode]}</p>
+                <p><strong>Voltage:</strong> ${status.voltage.toFixed(1)} V</p>
+                <p><strong>Temperature:</strong> ${status.temperature} °C</p>
+                <p><strong>Current:</strong> ${status.current.toFixed(1)} mA</p>
+                <p><strong>Protection:</strong> ${status.protectionActive ? 'Active' : 'Inactive'}</p>
+                <p><strong>Status Flags:</strong> 0x${status.statusFlags.toString(16).toUpperCase()}</p>
+            `;
+            updateCanvas(status.position);
+        }
+
+        simulator.setLogCallback(log => {
+            const p = document.createElement('p');
+            p.textContent = `[${log.timestamp}] ${log.message}`;
+            if (log.level === 'error') p.className = 'error';
+            if (log.level === 'warning') p.className = 'warning';
+            logPanel.appendChild(p);
+            logPanel.scrollTop = logPanel.scrollHeight;
+        });
+
+        async function connectSerial() {
+            if (!('serial' in navigator)) {
+                simulator.log('Web Serial API not supported. Use Chrome or Edge.', 'error');
+                return;
+            }
+            if (!window.isSecureContext) {
+                simulator.log('Secure context required. Serve over HTTPS or localhost (e.g., http-server).', 'error');
+                return;
+            }
+            if (isConnecting) return;
+            try {
+                isConnecting = true;
+                connectBtn.textContent = 'Connecting...';
+                connectBtn.disabled = true;
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 1000000 });
+                simulator.log('Serial port connected', 'info');
+                connectBtn.textContent = 'Disconnect Serial';
+                connectBtn.disabled = false;
+                readSerial(port);
+            } catch (err) {
+                if (err.name === 'SecurityError') {
+                    simulator.log('Serial access blocked. Ensure page is served over HTTPS or localhost and check browser permissions policy.', 'error');
+                } else if (err.name === 'NotFoundError') {
+                    simulator.log('No serial port selected. Please choose a port.', 'error');
+                } else {
+                    simulator.log(`Serial connection failed: ${err.name}: ${err.message}`, 'error');
+                }
+                port = null;
+                connectBtn.textContent = 'Connect Serial';
+                connectBtn.disabled = false;
+            } finally {
+                isConnecting = false;
+            }
+        }
+
+        async function disconnectSerial() {
+            if (port) {
+                try {
+                    await port.close();
+                    port = null;
+                    simulator.log('Serial port disconnected', 'info');
+                    connectBtn.textContent = 'Connect Serial';
+                } catch (err) {
+                    simulator.log(`Serial disconnection failed: ${err.message}`, 'error');
+                }
+            }
+        }
+
+        function concatUint8Arrays(a, b) {
+            const result = new Uint8Array(a.length + b.length);
+            result.set(a, 0);
+            result.set(b, a.length);
+            return result;
+        }
+        async function readSerial(serialPort) {
+
+            let reader = null;
+            let buffer = new Uint8Array(0);
+            try {
+                reader = serialPort.readable.getReader();
+                while (true) {
+                    const { value, done } = await reader.read();
+                    console.log(done,value);
+
+                    if (done) break;
+
+                    if (value) {
+                        buffer = concatUint8Arrays(buffer, value);
+                        if (buffer.length >= 4) {
+                            console.log(buffer);
+                            const response = simulator.processPacket(buffer);
+                            if (response && serialPort.writable) {
+                                const writer = serialPort.writable.getWriter();
+                                await writer.write(response);
+                                writer.releaseLock();
+                            }
+                            
+                        }
+                    }
+
+                }
+            } catch (err) {
+                simulator.log(`Serial read error: ${err.name}: ${err.message}`, 'error');
+                port = null;
+                connectBtn.textContent = 'Connect Serial';
+            } finally {
+                if (reader) reader.releaseLock();
+            }
+
+            // let reader = null;
+            // try {
+            //     reader = serialPort.readable.getReader();
+            //     while (true) {
+            //         const { value, done } = await reader.read();
+            //         console.log(done,value);
+            //         // if (done) break;
+            //         const response = simulator.processPacket(value);
+            //         if (response && serialPort.writable) {
+            //             const writer = serialPort.writable.getWriter();
+            //             await writer.write(response);
+            //             writer.releaseLock();
+            //         }
+            //     }
+            // } catch (err) {
+            //     simulator.log(`Serial read error: ${err.name}: ${err.message}`, 'error');
+            //     port = null;
+            //     connectBtn.textContent = 'Connect Serial';
+            // } finally {
+            //     if (reader) reader.releaseLock();
+            // }
+        }
+
+        function sendManualCommand() {
+            const command = manualCommandInput.value.trim();
+            //const command = "FF FF 01 02 01 FB".trim();
+            console.log(command);
+            if (!command) return;
+            try {
+                const bytes = command.split(/\s+/).map(x => parseInt(x, 16));
+                console.log(bytes);
+                if (bytes.some(isNaN)) throw new Error('Invalid hex bytes');
+                const response = simulator.processPacket(new Uint8Array(bytes));
+                console.log(response);
+                if (response) {
+                    simulator.log(`Manual command response: ${Array.from(response).map(x => x.toString(16).padStart(2, '0').toUpperCase()).join(' ')}`);
+                }
+            } catch (err) {
+                simulator.log(`Invalid command: ${err.message}`, 'error');
+            }
+            manualCommandInput.value = '';
+        }
+
+        connectBtn.addEventListener('click', () => {
+            if (port) disconnectSerial();
+            else connectSerial();
+        });
+        sendBtn.addEventListener('click', sendManualCommand);
+        manualCommandInput.addEventListener('keypress', e => {
+            if (e.key === 'Enter') sendManualCommand();
+        });
+
+        if (!window.isSecureContext) {
+            simulator.log('Page must be served over HTTPS or localhost for Web Serial', 'error');
+        }
+        if ('permissions' in navigator) {
+            navigator.permissions.query({ name: 'serial' }).catch(() => {});
+        }
+
+        simulator.startSimulation();
+        const interval = setInterval(updateStatus, 100);
+        window.addEventListener('unload', () => {
+            simulator.stopSimulation();
+            clearInterval(interval);
+            if (port) port.close().catch(() => {});
+        });
+    </script>
+</body>
+</html>
