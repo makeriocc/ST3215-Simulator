@@ -718,6 +718,7 @@
         async function readSerial(serialPort) {
 
             let reader = null;
+            console.log("new buffer");
             let buffer = new Uint8Array(0);
             try {
                 reader = serialPort.readable.getReader();
@@ -729,15 +730,15 @@
 
                     if (value) {
                         buffer = concatUint8Arrays(buffer, value);
-                        if (buffer.length >= 4) {
-                            console.log(buffer);
+                        console.log(buffer);
+                        if (buffer.length >= 4 && buffer[3] == (buffer.length-4)) {
                             const response = simulator.processPacket(buffer);
                             if (response && serialPort.writable) {
                                 const writer = serialPort.writable.getWriter();
                                 await writer.write(response);
                                 writer.releaseLock();
                             }
-                            
+                            buffer = new Uint8Array(0);
                         }
                     }
 
