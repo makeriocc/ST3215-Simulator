@@ -558,7 +558,7 @@
             }
             simulationLoop(timestamp) {
                 if (!this.simulationRunning) return;
-                const currentTime = timestamp / 1000;
+                const currentTime = timestamp / 100; // 1000
                 const dt = currentTime - this.lastUpdateTime;
                 this.lastUpdateTime = currentTime;
                 if (this.torqueEnabled && !this.protectionActive) {
